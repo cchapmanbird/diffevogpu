@@ -57,6 +57,7 @@ class DifferentialEvolution:
             strategy: str='best',
             maxiter: int=100,
             jittable_func: bool=False,
+            disp: bool=False,
         ):
 
         self.func = func
@@ -93,6 +94,7 @@ class DifferentialEvolution:
         self.initial_positions = None
 
         self.jittable_func = jittable_func
+        self.disp = disp
 
     def _ensure_control_input_shape(self, input):
         input = jnp.asarray(input)
@@ -208,6 +210,9 @@ class DifferentialEvolution:
             self.nfev += self.npop * self.nperpop
 
             ii += 1
+
+            if self.disp:
+                print(f"Iteration {ii}, best: {jnp.min(statistics, axis=1):.2e}")
 
             if self.tol is not None and _check_if_tol_exceeded(statistics, self.tol):
                 break
