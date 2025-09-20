@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devojax"
+description = "Vectorised differential evolution optimiser"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jax>=0.7.2",
+    "matplotlib>=3.10.6",
+]
+dynamic = ["version"]
+
+[tool.setuptools_scm]
