@@ -1,2 +1,5 @@
 # diffevogpu
-Differential evolution + CuPy. For inexpensive objective functions that require many evaluations
+
+Differential evolution + JAX. For inexpensive objective functions that require many evaluations.
+
+
