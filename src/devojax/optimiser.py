@@ -220,6 +220,9 @@ class DifferentialEvolution:
             statistics: Current statistics of shape (npop, nperpop).
         """
 
+        if self.backend == 'cupy':
+            return self._step_cupy_func(positions, statistics)
+        
         if self.jittable_func:
             return self._step_jit_func(positions, statistics)
         else:
