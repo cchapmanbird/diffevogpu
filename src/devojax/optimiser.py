@@ -1,124 +1,154 @@
-import jax.numpy as jnp
-import jax
-from functools import partial
 
-from .initialisation import latin_hypercube
-from .strategy import rand1, best1
+# from .jax.initialisation import latin_hypercube
+# from .jax.strategy import rand1, best1
 
+import numpy as np
 from typing import Union, Optional, Callable
-
-@partial(jax.jit, static_argnums=(0, 3, 4, 5, 6,))
-def _de_step(func, recombination, mutation, strategy_fun, npop, nperpop, ndim, positions, statistics, key):
-        key, new_positions = _propose_new_positions(key, positions, statistics, recombination,  mutation, strategy_fun, npop, nperpop, ndim)
-        new_statistics = func(new_positions)
-        positions, statistics = _accept_reject(positions, statistics, new_positions, new_statistics)
-        return key, positions, statistics
-
-@partial(jax.jit, static_argnums=(5, 6, 7, 8))
-def _propose_new_positions(key, positions, statistics, recombination, mutation, strategy_fun, npop, nperpop, ndim):
-        all_keys = jax.random.split(key, nperpop * npop + 3)
-        
-        avec, bvec, cvec = strategy_fun(all_keys[3:], positions, statistics, npop, nperpop)
-        
-        R = jax.random.randint(all_keys[1], (npop, nperpop), 0, ndim,)
-        r_i = jax.random.uniform(all_keys[2], (npop, nperpop, ndim))
-
-        retain = r_i < recombination[:,None,None]
-
-        retain = jnp.put_along_axis(retain, R[:, :, None], True, axis=2, inplace=False)
-
-        new_positions = jnp.where(retain, (avec + mutation[:,None,None] * (bvec - cvec)), positions)
-
-        return all_keys[0], new_positions
-
-@jax.jit
-def _accept_reject(positions, statistics, new_positions, new_statistics):
-    repl_mask = (new_statistics <= statistics)
-    positions = jnp.where(repl_mask[:,:,None], new_positions, positions)
-    statistics = jnp.where(repl_mask, new_statistics, statistics)
-    return positions, statistics
-
-@jax.jit
-def _check_if_tol_exceeded(statistics, tolerance):
-    return jnp.all(jnp.std(statistics, axis=1) < tolerance * jnp.abs(jnp.mean(statistics, axis=1)))
-
+from numpy.typing import ArrayLike
 
 class DifferentialEvolution:
     def __init__(
             self,
             func: Callable,
-            bounds: jax.Array,
-            key: jax.Array,
+            bounds: ArrayLike,
+            backend: str = 'jax',
+            key_or_generator: Optional[ArrayLike]=None,
             nperpop: int=15,
             npop: int=1,
-            recombination: Union[float, jax.Array]=0.7,
-            mutation: Union[float, jax.Array]=0.5,
-            tol: Optional[Union[float, jax.Array]] = None,
+            recombination: Union[float, ArrayLike]=0.7,
+            mutation: Union[float, ArrayLike]=0.5,
+            tol: Optional[Union[float, ArrayLike]] = None,
             strategy: str='best',
             maxiter: int=100,
             jittable_func: bool=False,
             disp: bool=False,
         ):
+        self.backend = backend
 
         self.func = func
+        self.npop = npop
 
         if bounds.ndim == 3:
             assert bounds.shape[0] == npop, "First dimension of bounds must match number of populations."
-        elif bounds.ndim == 2:
-            bounds = jnp.tile(bounds[None, :, :], (npop, 1, 1))
 
-        self.bounds = bounds
-        self.ndim = bounds.shape[1]
+        assert strategy in ['rand', 'best'], "Strategy must be 'rand' or 'best'."
+        self.strategy = strategy
 
-        self.key = key
+        if backend == 'jax':
+            self._jax_init(bounds, key_or_generator)
+        elif backend == 'cupy':
+            self._cupy_init(bounds, key_or_generator)
+
+        self.ndim = self.bounds.shape[1]
         self.nperpop = nperpop * self.ndim
-        self.npop = npop
-        
+
         self.recombination = self._ensure_control_input_shape(recombination)
         self.mutation = self._ensure_control_input_shape(mutation)
         
         self.tol = tol
         if self.tol is not None:
             self.tol = self._ensure_control_input_shape(tol)
-            if jnp.all(self.tol == 0):
+            if self.xp.all(self.tol == 0):
                 self.tol = None
 
-        assert strategy in ['rand', 'best'], "Strategy must be 'rand' or 'best'."
-        self.strategy = strategy
-        if strategy == 'rand':
-            self.strategy_fun = rand1
-        elif strategy == 'best':
-            self.strategy_fun = best1
-
         self.maxiter = maxiter
-        self.initial_positions = None
-
         self.jittable_func = jittable_func
         self.disp = disp
+    
+        self.initial_positions = None
+        self.nfev = 0
+        self.niter = 0
+        self.pos = []
+        self.stat = []
+
+    def _jax_init(self, bounds, key):
+        import jax
+        import jax.numpy as jnp
+        from .jax.initialisation import latin_hypercube
+        from .jax.strategy import rand1, best1
+        from .jax.steps import _de_step, _propose_new_positions, _accept_reject, _check_if_tol_exceeded
+
+        if bounds.ndim == 2:
+            bounds = jnp.tile(bounds[None, :, :], (self.npop, 1, 1))
+
+        self.bounds = bounds
+
+        self.xp = jnp
+        
+        self.latin_hypercube = latin_hypercube
+        self._de_step = _de_step
+        self._propose_new_positions = _propose_new_positions
+        self._accept_reject = _accept_reject
+        self._check_if_tol_exceeded = _check_if_tol_exceeded
+
+        if self.strategy == 'rand':
+            self.strategy_fun = rand1
+        elif self.strategy == 'best':
+            self.strategy_fun = best1
+
+        if key is None:
+            key = jax.random.PRNGKey(0)
+        
+        self.key_or_generator = key
+
+    def _cupy_init(self, bounds, generator):
+        import cupy as cp
+        from .cupy.initialisation import latin_hypercube
+        from .cupy.strategy import rand1, best1
+        from .cupy.steps import _de_step, _check_if_tol_exceeded
+
+        if bounds.ndim == 2:
+            bounds = cp.tile(bounds[None, :, :], (self.npop, 1, 1))
+
+        self.bounds = bounds
+
+        self.xp = cp
+        
+        self.latin_hypercube = latin_hypercube
+        self._de_step = _de_step
+        self._check_if_tol_exceeded = _check_if_tol_exceeded
+
+        if self.strategy == 'rand':
+            self.strategy_fun = rand1
+        elif self.strategy == 'best':
+            self.strategy_fun = best1
+
+        if generator is None:
+            generator = cp.random.default_rng(0)
+        self.key_or_generator = generator
+
+    def as_numpy(self, obj: ArrayLike):
+        if self.backend == 'jax':
+            return np.asarray(obj)
+        elif self.backend == 'cupy':
+            return obj.get()
 
     def _ensure_control_input_shape(self, input):
-        input = jnp.asarray(input)
+        input = self.xp.asarray(input)
         if input.size == 1:
-            input = jnp.full(self.npop, input)
+            input = self.xp.full(self.npop, input)
         else:
             assert input.size == self.npop, "Array of control parameters must match number of populations."
 
         return input
     
-    def set_rng(self, key: jax.Array):
+    def set_rng(self, key_or_generator: ArrayLike):
         """
-        Update the random key.
+        Update the random key (JAX) or generator (cupy).
         """
-        self.key = key
+        if self.backend == 'jax':
+            self.key_or_generator = key_or_generator
+        elif self.backend == 'cupy':
+            self.key_or_generator = key_or_generator
 
     def _step_nojit_func(
             self,
-            positions: jax.Array,
-            statistics: jax.Array,
+            positions: ArrayLike,
+            statistics: ArrayLike,
     ):
 
-        self.key, new_positions = _propose_new_positions(
-            self.key,
+        self.key_or_generator, new_positions = self._propose_new_positions(
+            self.key_or_generator,
             positions,
             self.recombination,
             self.mutation,
@@ -130,7 +160,7 @@ class DifferentialEvolution:
 
         new_statistics = self.func(new_positions)
 
-        positions, statistics = _accept_reject(
+        positions, statistics = self._accept_reject(
             positions,
             statistics,
             new_positions,
@@ -144,7 +174,7 @@ class DifferentialEvolution:
             positions,
             statistics
         ):
-        self.key, positions, statistics = _de_step(
+        self.key_or_generator, positions, statistics = self._de_step(
             self.func,
             self.recombination,
             self.mutation,
@@ -154,13 +184,33 @@ class DifferentialEvolution:
             self.ndim,
             positions,
             statistics,
-            self.key
+            self.key_or_generator
         )
         return positions, statistics
 
+    def _step_cupy_func(
+            self,
+            positions,
+            statistics
+        ):
+        positions, statistics = self._de_step(
+            self.func,
+            self.recombination,
+            self.mutation,
+            self.strategy_fun,
+            self.npop,
+            self.nperpop,
+            self.ndim,
+            positions,
+            statistics,
+            self.key_or_generator
+        )
+
+        return positions, statistics
+
     def step(self,
-             positions: jax.Array, 
-             statistics: jax.Array
+             positions: ArrayLike, 
+             statistics: ArrayLike
         ):
         """
         Perform one iteration of the differential evolution algorithm.
@@ -177,7 +227,7 @@ class DifferentialEvolution:
 
     def __call__(
             self,
-            initial_positions: Optional[jax.Array] = None,
+            initial_positions: Optional[ArrayLike] = None,
     ):
 
         if initial_positions is not None:
@@ -185,8 +235,8 @@ class DifferentialEvolution:
                 "Initial positions must have shape (npop, nperpop, ndim)."
             self.initial_positions = initial_positions
         else:
-            self.initial_positions = latin_hypercube(
-                key=self.key,
+            self.initial_positions = self.latin_hypercube(
+                self.key_or_generator,
                 ndim=self.ndim,
                 nsamp=self.nperpop,
                 nperinterval=self.npop,
@@ -212,9 +262,9 @@ class DifferentialEvolution:
             ii += 1
 
             if self.disp:
-                print(f"Iteration {ii}, best: {jnp.min(statistics, axis=1):.2e}")
+                print(f"Iteration {ii}, best: {self.xp.min(statistics, axis=1)}")
 
-            if self.tol is not None and _check_if_tol_exceeded(statistics, self.tol):
+            if self.tol is not None and self._check_if_tol_exceeded(statistics, self.tol):
                 break
 
         self.niter = ii
