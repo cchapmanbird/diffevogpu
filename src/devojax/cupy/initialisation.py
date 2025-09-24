@@ -27,7 +27,6 @@ def latin_hypercube(
         samples = generator.uniform(0, 1, size=(nperinterval, nsamp, ndim))
 
         perms = cp.tile(cp.arange(1, nsamp + 1)[None,:,None], (nperinterval, 1, ndim))
-        perms = generator.shuffle(perms, axis=1, independent=True)    
         perms = cp.take_along_axis(perms, generator.standard_normal(perms.shape).argsort(axis=1), axis=1)
 
         if bounds is not None:
