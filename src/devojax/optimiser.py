@@ -38,7 +38,9 @@ class DifferentialEvolution:
             self._jax_init(bounds, key_or_generator)
         elif backend == 'cupy':
             self._cupy_init(bounds, key_or_generator)
-
+        else:
+            raise ValueError("Backend must be 'jax' or 'cupy'.")
+        
         self.ndim = self.bounds.shape[1]
         self.nperpop = nperpop * self.ndim
 
